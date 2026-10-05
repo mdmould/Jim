@@ -10,6 +10,7 @@ from typing import Any, Optional
 import jax
 import jax.numpy as jnp
 import numpy as np
+import tqdm
 from anesthetic.samples import NestedSamples
 from blackjax.ns.adaptive import AdaptiveNSState
 from blackjax.ns.base import NSInfo
@@ -214,35 +215,45 @@ class BlackJAXNSAWSampler(Sampler):
             dead = []
             n_iter = 0
 
-        def _terminate(state: AdaptiveNSState) -> bool:
-            dlogz = jnp.logaddexp(0, state.integrator.logZ_live - state.integrator.logZ)
+        # def _terminate(state: AdaptiveNSState) -> bool:
+        #     dlogz = jnp.logaddexp(0, state.integrator.logZ_live - state.integrator.logZ)
+        #     return bool(jnp.isfinite(dlogz) and dlogz < config.termination_dlogz)
+
+        def _terminate(dlogz):
             return bool(jnp.isfinite(dlogz) and dlogz < config.termination_dlogz)
 
         step_fn = jax.jit(nested_sampler.step)
         _last_ckpt_t = time.perf_counter()
 
-        while not _terminate(state):
-            rng_key, subkey = jax.random.split(rng_key)
-            state, dead_info = step_fn(subkey, state)
-            dead.append(dead_info)
-            n_iter += 1
-            if (
-                ckpt_path is not None
-                and config.checkpoint_interval > 0
-                and time.perf_counter() - _last_ckpt_t >= config.checkpoint_interval
-            ):
-                _last_ckpt_t = config.write_checkpoint(
-                    {
-                        "state": state,
-                        "dead": dead,
-                        "rng_key": rng_key,
-                        "n_iter": n_iter,
-                        "sampler_name": self.sampler_name,
-                        "elapsed_time": self._prev_elapsed
-                        + (time.perf_counter() - _method_t0),
-                    },
-                    self.sampler_name,
-                )
+        with tqdm.tqdm() as pbar:
+            # while not _terminate(state):
+            dlogz = np.inf
+            while not _terminate(dlogz):
+                rng_key, subkey = jax.random.split(rng_key)
+                state, dead_info = step_fn(subkey, state)
+                dead.append(dead_info)
+                n_iter += 1
+                if (
+                    ckpt_path is not None
+                    and config.checkpoint_interval > 0
+                    and time.perf_counter() - _last_ckpt_t >= config.checkpoint_interval
+                ):
+                    _last_ckpt_t = config.write_checkpoint(
+                        {
+                            "state": state,
+                            "dead": dead,
+                            "rng_key": rng_key,
+                            "n_iter": n_iter,
+                            "sampler_name": self.sampler_name,
+                            "elapsed_time": self._prev_elapsed
+                            + (time.perf_counter() - _method_t0),
+                        },
+                        self.sampler_name,
+                    )
+
+                dlogz = jnp.logaddexp(0, state.integrator.logZ_live - state.integrator.logZ)
+                pbar.update()
+                pbar.set_postfix(dict(dlogz = dlogz))
 
         self._final_state = finalise(state, dead)
         self._n_iterations = n_iter
